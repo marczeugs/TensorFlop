@@ -142,9 +142,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         val validationAccuracies = mutableListOf<Double>()
 
         // TODO: adam optimizer
-        // TODO: regularisation
-        // TODO: markov dataset
-        // TODO: other loss function
+        // TODO: learning rate decay
 
         val trainingData = inputs.zip(targets).shuffled()
 
@@ -311,6 +309,15 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
             },
             df = { targetOutput, computedOutput ->
                 (1.0 / computedOutput.size) * -2.0 * (targetOutput - computedOutput)
+            }
+        )
+
+        val crossEntropy = LossFunction(
+            f = { targetOutput, computedOutput ->
+                (-targetOutput * computedOutput.map { ln(it) }).sum()
+            },
+            df = { targetOutput, computedOutput ->
+                computedOutput - targetOutput // TODO: confirm this
             }
         )
     }

@@ -164,7 +164,7 @@ class NeuralNetworkTest : BehaviorSpec() {
                         epochs = testConfig.epochs,
                         batchSize = 32,
                         validationPercentage = 0.2,
-                        lossFunction = NeuralNetwork.LossFunctions.meanSquaredError,
+                        lossFunction = NeuralNetwork.LossFunctions.crossEntropy,
                         optimizer = testConfig.optimizer,
                         regularizationFunction = testConfig.regularizationFunction
                     )
