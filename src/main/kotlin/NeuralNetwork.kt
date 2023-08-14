@@ -8,10 +8,7 @@ import org.jetbrains.kotlinx.multik.api.math.argMax
 import org.jetbrains.kotlinx.multik.ndarray.data.*
 import org.jetbrains.kotlinx.multik.ndarray.operations.*
 import java.util.random.RandomGenerator
-import kotlin.math.ceil
-import kotlin.math.exp
-import kotlin.math.roundToInt
-import kotlin.math.sqrt
+import kotlin.math.*
 import kotlin.random.Random
 
 class NeuralNetwork private constructor(private val layers: List<Layer>) {
@@ -89,7 +86,8 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         targetOutputLayers: MultiArray<Double, D2>,
         activations: List<MultiArray<Double, D2>>,
         hiddenStates: List<MultiArray<Double, D2>>,
-        lossFunctionDerivative: (MultiArray<Double, D1>, MultiArray<Double, D1>) -> MultiArray<Double, D1>
+        lossFunctionDerivative: (MultiArray<Double, D1>, MultiArray<Double, D1>) -> MultiArray<Double, D1>,
+        regularizationFunctionDerivative: (MultiArray<Double, D2>) -> MultiArray<Double, D2>,
     ): Pair<List<MultiArray<Double, D2>>, List<MultiArray<Double, D2>>> {
         // Calculate loss function derivative
         var delta = mk.stack(
@@ -121,7 +119,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
                 .fold(mk.zeros<Double>(delta.shape[1])) { sum, next -> sum + next }
                 .expandDims(0)
 
-            weightGradients[k] = hiddenStates[k].transpose() dot delta
+            weightGradients[k] = (hiddenStates[k].transpose() dot delta) + regularizationFunctionDerivative(layers[k].weights)
 
             delta = delta dot layers[k].weights.transpose()
         }
@@ -133,10 +131,11 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         inputs: List<MultiArray<Double, D1>>,
         targets: List<MultiArray<Double, D1>>,
         epochs: Int,
-        validationPercentage: Double,
-        batchSize: Int,
-        lossFunction: LossFunction,
-        optimizer: Optimizer
+        batchSize: Int = 32,
+        validationPercentage: Double = 0.2,
+        lossFunction: LossFunction = LossFunctions.meanSquaredError,
+        optimizer: Optimizer = Optimizer.StochasticGradientDescent(),
+        regularizationFunction: RegularizationFunction = RegularizationFunctions.None
     ): TrainingOutput {
         val trainingLosses = mutableListOf<Double>()
         val validationLosses = mutableListOf<Double>()
@@ -153,24 +152,26 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         val validationData = trainingData.drop(ceil(trainingData.size * (1 - validationPercentage)).roundToInt())
 
         repeat(epochs) { epoch ->
-            var loss = 0.0
+            val loss = actualTrainingData.windowed(size = batchSize, step = batchSize, partialWindows = true)
+                .map { it.unzip() }
+                .sumOf { (inputBatch, targetBatch) ->
+                    val (activations, hiddenStates) = forwardPass(mk.stack(inputBatch)).unzip()
 
-            for ((inputBatch, targetBatch) in actualTrainingData.windowed(size = batchSize, step = batchSize, partialWindows = true).map { it.unzip() }) {
-                val (activations, hiddenStates) = forwardPass(mk.stack(inputBatch)).unzip()
+                    val (weightGradients, biasGradients) = backwardPass(
+                        targetOutputLayers = mk.stack(targetBatch),
+                        activations = activations,
+                        hiddenStates = hiddenStates,
+                        lossFunctionDerivative = lossFunction.df,
+                        regularizationFunctionDerivative = regularizationFunction.df
+                    )
 
-                loss += targetBatch.zip(hiddenStates.last().rows()).sumOf { (target, hiddenState) -> lossFunction.f(target, hiddenState) }
+                    optimizer.applyGradients(layers, weightGradients, biasGradients, batchSize)
 
-                val (weightGradients, biasGradients) = backwardPass(
-                    targetOutputLayers = mk.stack(targetBatch),
-                    activations = activations,
-                    hiddenStates = hiddenStates,
-                    lossFunctionDerivative = lossFunction.df
-                )
+                    targetBatch.zip(hiddenStates.last().rows()).sumOf { (target, hiddenState) -> lossFunction.f(target, hiddenState) } +
+                        layers.sumOf { regularizationFunction.f(it.weights) } * batchSize
+                }
 
-                optimizer.applyGradients(layers, weightGradients, biasGradients, batchSize)
-            }
-
-            trainingLosses += loss / targets.size
+            trainingLosses += loss / inputs.size
 
             val (validationLoss, validationAccuracy) = if (validationData.isNotEmpty()) {
                 validationData.unzip()
@@ -180,11 +181,13 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
                         val predictionIndices: MultiArray<Int, D1> = hiddenStates.last().rows().map { it.argMax() }.toNDArray()
                         val correctIndices: MultiArray<Int, D1> = mk.stack(validationTargets).rows().map { it.argMax() }.toNDArray()
 
-                        validationTargets.zip(hiddenStates.last().rows())
-                            .sumOf { (target, hiddenState) -> lossFunction.f(target, hiddenState) } / validationTargets.size to
+                        Pair(
+                            validationTargets.zip(hiddenStates.last().rows())
+                                .sumOf { (target, hiddenState) -> lossFunction.f(target, hiddenState) } / validationTargets.size,
                             predictionIndices.toList()
                                 .zip(correctIndices.toList())
                                 .count { (prediction, correct) -> prediction == correct }.toDouble() / predictionIndices.size
+                        )
                     }
             } else {
                 Double.NaN to Double.NaN
@@ -207,17 +210,20 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         )
     }
 
+
     data class TrainingOutput(
         val trainingLosses: List<Double>,
         val validationLosses: List<Double>,
         val validationAccuracies: List<Double>,
     )
 
+
     data class Layer(
         val weights: MultiArray<Double, D2>,
         val biases: MultiArray<Double, D2>,
         val activationFunction: ActivationFunction
     )
+
 
     sealed class WeightInitializers(private val initializer: (Int, Int) -> Double) : (Int, Int) -> Double by initializer {
         data object He : WeightInitializers({ previousLayerSize, _ ->
@@ -228,6 +234,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
             (sqrt(6.0) / sqrt(previousLayerSize.toDouble() + currentLayerSize)).let { Random.nextDouble(-it, it) }
         })
     }
+
 
     data class ActivationFunction(
         val f: Operation<*>,
@@ -291,6 +298,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         )
     }
 
+
     data class LossFunction(
         val f: (targetOutput: MultiArray<Double, D1>, computedOutput: MultiArray<Double, D1>) -> Double,
         val df: (targetOutput: MultiArray<Double, D1>, computedOutput: MultiArray<Double, D1>) -> MultiArray<Double, D1>
@@ -307,7 +315,8 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         )
     }
 
-    sealed interface Optimizer {
+
+    interface Optimizer {
         fun applyGradients(layers: List<Layer>, weightGradients: List<MultiArray<Double, D2>>, biasGradients: List<MultiArray<Double, D2>>, batchSize: Int)
 
         class StochasticGradientDescent(
@@ -336,5 +345,28 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
                 epoch++
             }
         }
+    }
+
+
+    abstract class RegularizationFunction(
+        val f: (weights: MultiArray<Double, D2>) -> Double,
+        val df: (weights: MultiArray<Double, D2>) -> MultiArray<Double, D2>
+    )
+
+    object RegularizationFunctions {
+        object None : RegularizationFunction(
+            f = { 0.0 },
+            df = { mk.zeros<Double>(it.shape[0], it.shape[1]) }
+        )
+
+        class L1(private val regularizationPenalty: Double = 0.01) : RegularizationFunction(
+            f = { weights -> weights.map { it.absoluteValue }.sum() * regularizationPenalty },
+            df = { weights ->  weights.map { if (it < 0) -regularizationPenalty else regularizationPenalty } }
+        )
+
+        class L2(private val regularizationPenalty: Double = 0.01) : RegularizationFunction(
+            f = { weights -> weights.map { it.pow(2) }.sum() * regularizationPenalty },
+            df = { weights ->  weights.map { 2.0 * it * regularizationPenalty } }
+        )
     }
 }

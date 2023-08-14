@@ -22,7 +22,7 @@ class NeuralNetworkTest : BehaviorSpec() {
     init {
         afterTest { (testCase, result) ->
             if (result.isErrorOrFailure) {
-                failedTests += testCase.name.testName to lastTrainingOutput
+                failedTests += testCase.parent!!.name.testName to lastTrainingOutput
             }
         }
 
@@ -74,10 +74,11 @@ class NeuralNetworkTest : BehaviorSpec() {
                         mk.ndarray(mk[0.0]),
                     ),
                     validationPercentage = 0.0,
-                    epochs = 100,
+                    epochs = 200,
                     batchSize = 4,
                     lossFunction = NeuralNetwork.LossFunctions.meanSquaredError,
-                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent()
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(learningRate = 0.2),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.L2()
                 )
 
                 then("it should predict XOR data correctly") {
@@ -111,21 +112,68 @@ class NeuralNetworkTest : BehaviorSpec() {
                 outputLayerActivationFunction = NeuralNetwork.ActivationFunctions.softmax
             )
 
-            `when`("we train it on the Iris dataset") {
-                lastTrainingOutput = irisNetwork.train(
-                    inputs = inputs,
-                    targets = targets,
-                    epochs = 100,
-                    batchSize = 32,
-                    validationPercentage = 0.2,
-                    lossFunction = NeuralNetwork.LossFunctions.meanSquaredError,
-                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent()
-                )
+            data class TestConfig(
+                val name: String,
+                val optimizer: NeuralNetwork.Optimizer,
+                val regularizationFunction: NeuralNetwork.RegularizationFunction,
+                val epochs: Int
+            )
 
-                then("it should predict the flowers correctly") {
-                    irisNetwork.predict(mk.ndarray(mk[6.9, 3.2, 5.7, 2.3])).argMax() shouldBe 2
-                    irisNetwork.predict(mk.ndarray(mk[6.6, 3.0, 4.4, 1.4])).argMax() shouldBe 1
-                    irisNetwork.predict(mk.ndarray(mk[5.1, 3.8, 1.9, 0.4])).argMax() shouldBe 0
+            listOf(
+                TestConfig(
+                    name = "no regularization, default learning rate, 100 epochs",
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.None,
+                    epochs = 100
+                ),
+                TestConfig(
+                    name = "L1 regularization, default learning rate, 100 epochs",
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.L1(),
+                    epochs = 100
+                ),
+                TestConfig(
+                    name = "L2 regularization, default learning rate, 100 epochs",
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.L2(),
+                    epochs = 100
+                ),
+                TestConfig(
+                    name = "no regularization, default learning rate, 200 epochs",
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(learningRate = 0.05),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.None,
+                    epochs = 200
+                ),
+                TestConfig(
+                    name = "L1 regularization, default learning rate, 1000 epochs",
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.L1(),
+                    epochs = 1000
+                ),
+                TestConfig(
+                    name = "L2 regularization, default learning rate, 1000 epochs",
+                    optimizer = NeuralNetwork.Optimizer.StochasticGradientDescent(),
+                    regularizationFunction = NeuralNetwork.RegularizationFunctions.L2(),
+                    epochs = 1000
+                ),
+            ).forEach { testConfig ->
+                `when`("we train it on the Iris dataset with ${testConfig.name}") {
+                    lastTrainingOutput = irisNetwork.train(
+                        inputs = inputs,
+                        targets = targets,
+                        epochs = testConfig.epochs,
+                        batchSize = 32,
+                        validationPercentage = 0.2,
+                        lossFunction = NeuralNetwork.LossFunctions.meanSquaredError,
+                        optimizer = testConfig.optimizer,
+                        regularizationFunction = testConfig.regularizationFunction
+                    )
+
+                    then("it should predict the flowers correctly") {
+                        irisNetwork.predict(mk.ndarray(mk[6.9, 3.2, 5.7, 2.3])).argMax() shouldBe 2
+                        irisNetwork.predict(mk.ndarray(mk[6.6, 3.0, 4.4, 1.4])).argMax() shouldBe 1
+                        irisNetwork.predict(mk.ndarray(mk[5.1, 3.8, 1.9, 0.4])).argMax() shouldBe 0
+                    }
                 }
             }
         }
