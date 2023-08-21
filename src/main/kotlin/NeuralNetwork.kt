@@ -1,3 +1,4 @@
+
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
@@ -57,21 +58,20 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
     fun predict(input: MultiArray<Double, D1>) =
         forwardPass(input.expandDims(0)).last().second.reshape(layers.last().weights.shape[1])
 
-    /**
-     * Outputs List of activations paired with hidden states
-     */
     private fun forwardPass(inputLayer: MultiArray<Double, D2>): List<Pair<MultiArray<Double, D2>, MultiArray<Double, D2>>> =
         layers.runningFold(inputLayer to inputLayer) { (_, previousNodes), currentLayer ->
             val activations =
                 (previousNodes dot currentLayer.weights) +
-                    when (inputLayer.shape[0]) {
-                        1 -> currentLayer.biases
-                        else -> mk.stack(List(inputLayer.shape[0]) { currentLayer.biases.flatten() }, axis = 0)
-                    }
+                // We have to account for cases because the mk.stack function doesn't work for an array size of 1
+                when (inputLayer.shape[0]) {
+                    1 -> currentLayer.biases
+                    else -> mk.stack(List(inputLayer.shape[0]) { currentLayer.biases.flatten() }, axis = 0)
+                }
 
             activations to when (val f = currentLayer.activationFunction.f) {
                 is ActivationFunction.Operation.SingleValue -> activations.map(f::invoke)
                 is ActivationFunction.Operation.MultipleValues ->
+                    // We have to account for cases because the mk.stack function doesn't work for an array size of 1
                     when (activations.shape[0]) {
                         1 -> f(activations)
                         else -> mk.stack(
@@ -89,9 +89,11 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         lossFunctionDerivative: (MultiArray<Double, D1>, MultiArray<Double, D1>) -> MultiArray<Double, D1>,
         regularizationFunctionDerivative: (MultiArray<Double, D2>) -> MultiArray<Double, D2>,
     ): Pair<List<MultiArray<Double, D2>>, List<MultiArray<Double, D2>>> {
+        val batchSize = targetOutputLayers.shape[0]
+
         // Calculate loss function derivative
         var delta = mk.stack(
-            (0..<targetOutputLayers.shape[0])
+            (0..<batchSize)
                 .map {
                     lossFunctionDerivative(
                         targetOutputLayers[it],
@@ -109,8 +111,10 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
             delta = when (val df = layers[k].activationFunction.df) {
                 is ActivationFunction.Operation.SingleValue -> delta * activations[k + 1].map(df::invoke)
                 is ActivationFunction.Operation.MultipleValues -> mk.stack(
-                    (0..<delta.shape[0])
-                        .map { (delta[it].expandDims(0) dot df(activations[k + 1][it].expandDims(0))).flatten() }
+                    (0..<batchSize) // batchSize is also delta.shape[0]
+                        .map {
+                            (delta[it].expandDims(0) dot df(activations[k + 1][it].expandDims(0))).flatten()
+                        }
                 )
             }
 
@@ -194,7 +198,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
             validationLosses += validationLoss
             validationAccuracies += validationAccuracy
 
-            println("Epoch $epoch - Training loss: ${trainingLosses.last()} - Validation loss: $validationLoss - Validation accuracy: $validationAccuracy")
+            println("Epoch ${epoch + 1} - Training loss: ${trainingLosses.last()} - Validation loss: $validationLoss - Validation accuracy: $validationAccuracy")
 
             if (trainingLosses.last().isNaN()) {
                 error("Losses are NaN")
@@ -277,7 +281,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
         val softmax: ActivationFunction = ActivationFunction(
             f = ActivationFunction.Operation.MultipleValues(::softmax),
             df = ActivationFunction.Operation.MultipleValues { values ->
-                val column = softmax(values).reshape(values.size)
+                val column = softmax(values).flatten()
                 val stackedHorizontally = mk.stack(List(values.size) { column }, axis = 1)
                 val identity = mk.identity<Double>(values.size)
 
@@ -335,7 +339,7 @@ class NeuralNetwork private constructor(private val layers: List<Layer>) {
 
             private var epoch = 0
 
-            override fun applyGradients(layers: List<Layer>, weightGradients: List<MultiArray<Double, D2>>, biasGradients: List<MultiArray<Double, D2>>, batchSize: Int,) {
+            override fun applyGradients(layers: List<Layer>, weightGradients: List<MultiArray<Double, D2>>, biasGradients: List<MultiArray<Double, D2>>, batchSize: Int) {
                 if (weightVelocities == null && biasVelocities == null) {
                     weightVelocities = MutableList(layers.size) { index -> layers[index].weights.shape.let { mk.zeros<Double>(it[0], it[1]) } }
                     biasVelocities = MutableList(layers.size) { index -> layers[index].biases.shape.let { mk.zeros<Double>(it[0], it[1]) } }
